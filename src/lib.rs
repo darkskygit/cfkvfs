@@ -1,10 +1,13 @@
+mod database;
 mod utils;
 
+use database::{KvCache, LruKvCache, SqliteKvCache};
 use lazy_static::lazy_static;
 use log::error;
 use rayon::prelude::*;
 use reqwest::{blocking::Client, redirect::Policy, Identity};
 use std::convert::TryInto;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use utils::get_hash;
 
@@ -14,6 +17,10 @@ const CHUNK_SIZE: usize = 1024 * 1024;
 pub enum CfKvFsError {
     #[error("Data transfer error: {0}")]
     ReqwestError(#[from] reqwest::Error),
+    #[error("Database error: {0}")]
+    RusqliteError(#[from] rusqlite::Error),
+    #[error("Database migration error: {0}")]
+    RusqliteMigrationError(#[from] rusqlite_migration::Error),
     #[error("Data parse error: {0}")]
     IntParseConvertError(#[from] std::array::TryFromSliceError),
     #[error("Data invalid")]
@@ -92,21 +99,28 @@ impl CfKvFs {
     }
 
     fn get_data(&self, name: &str, hash: i64) -> Result<Vec<u8>, CfKvFsError> {
+        lazy_static! {
+            static ref KV_CACHE: Arc<Mutex<Box<dyn KvCache + Send + Sync>>> = Arc::new(Mutex::new(
+                SqliteKvCache::new("./cache.db", "kv").unwrap_or_else(|_| LruKvCache::new())
+            ));
+        }
+        let key = format!(
+            "{}:{}",
+            name,
+            if hash == 0 {
+                "index".into()
+            } else {
+                hash.to_string()
+            }
+        );
+        if let Ok(Some(value)) = KV_CACHE.lock().unwrap().get(key.clone()) {
+            return Ok(value);
+        }
         let mut retry = 0;
         let mut buf: Vec<u8> = vec![];
         while let Err(err) = self
             .client
-            .get(format!(
-                "{}/{}/{}:{}",
-                self.endpoint,
-                self.prefix,
-                name,
-                if hash == 0 {
-                    "index".into()
-                } else {
-                    hash.to_string()
-                }
-            ))
+            .get(format!("{}/{}/{}", self.endpoint, self.prefix, key))
             .send()
             .and_then(|mut resp| resp.copy_to(&mut buf))
             .map_err(CfKvFsError::ReqwestError)
@@ -124,7 +138,7 @@ impl CfKvFs {
                 retry += 1;
             }
         }
-        Ok(buf)
+        Ok(KV_CACHE.lock().unwrap().put(key, buf)?)
     }
 
     pub fn get_blob(&self, name: &str) -> Result<Vec<u8>, CfKvFsError> {
@@ -147,14 +161,14 @@ impl CfKvFs {
 #[test]
 fn test_upload() {
     let pem = include_bytes!("cert.pem");
-    let cf = CfKvFs::new("https://darksky.eu.org", "fs/", Some(pem.to_vec())).unwrap();
+    let cf = CfKvFs::new("https://darksky.eu.org", "fs", Some(pem.to_vec())).unwrap();
     cf.put_blob("test.bin", std::fs::read("test.bin").unwrap());
 }
 
 #[test]
 fn test_download() {
     let pem = include_bytes!("cert.pem");
-    let cf = CfKvFs::new("https://darksky.eu.org", "fs/", Some(pem.to_vec())).unwrap();
+    let cf = CfKvFs::new("https://darksky.eu.org", "fs", Some(pem.to_vec())).unwrap();
     let bin = cf.get_blob("test.bin").unwrap();
     std::fs::write("test1.bin", bin).unwrap();
 }

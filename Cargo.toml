@@ -8,7 +8,9 @@ edition = "2018"
 [dependencies]
 lazy_static = "1.4.0"
 log = "0.4.14"
+lru = "0.6.6"
 rayon = "1.5.1"
+rusqlite_migration = "0.4.2"
 sha3 = "0.9.1"
 thiserror = "1.0.26"
 
