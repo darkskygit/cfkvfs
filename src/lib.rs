@@ -5,9 +5,17 @@ use database::{KvCache, LruKvCache, SqliteKvCache};
 use lazy_static::lazy_static;
 use log::error;
 use rayon::prelude::*;
-use reqwest::{blocking::Client, redirect::Policy, Identity};
-use std::convert::TryInto;
-use std::sync::{Arc, Mutex};
+use reqwest::{
+    blocking::Client,
+    header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    redirect::Policy,
+    Identity,
+};
+use std::{
+    convert::TryInto,
+    iter::FromIterator,
+    sync::{Arc, Mutex},
+};
 use thiserror::Error;
 use utils::get_hash;
 
@@ -27,14 +35,95 @@ pub enum CfKvFsError {
     HashError,
 }
 
+pub struct CfKvFsBuilder {
+    endpoint: String,
+    prefix: String,
+    header: Option<HeaderMap>,
+    pem: Option<Vec<u8>>,
+    reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+}
+
+impl CfKvFsBuilder {
+    fn new<E, P>(endpoint: E, prefix: P) -> Self
+    where
+        E: Into<String>,
+        P: Into<String>,
+    {
+        Self {
+            endpoint: endpoint.into(),
+            prefix: prefix.into(),
+            header: None,
+            pem: None,
+            reducer: None,
+        }
+    }
+
+    pub fn auth(self, auth: &str) -> Self {
+        if let Ok(auth) = HeaderValue::from_str(auth) {
+            let header = HeaderMap::from_iter([(AUTHORIZATION, auth)]);
+            self.header(header)
+        } else {
+            self
+        }
+    }
+
+    pub fn header(mut self, header: HeaderMap) -> Self {
+        self.header = Some(header);
+        self
+    }
+
+    pub fn pem(mut self, pem: Vec<u8>) -> Self {
+        self.pem = Some(pem);
+        self
+    }
+
+    pub fn reducer<R: 'static + Fn(Vec<u8>) -> Vec<u8> + Sync>(mut self, reducer: R) -> Self {
+        self.reducer = Some(Box::new(reducer));
+        self
+    }
+
+    pub fn build(self) -> Option<CfKvFs> {
+        CfKvFs::inner_new(
+            self.endpoint,
+            self.prefix,
+            self.header,
+            self.pem,
+            self.reducer,
+        )
+    }
+}
+
 pub struct CfKvFs {
     client: Client,
     endpoint: String,
     prefix: String,
+    reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
 }
 
 impl CfKvFs {
-    pub fn new<E, P>(endpoint: E, prefix: P, pem: Option<Vec<u8>>) -> Option<Self>
+    pub fn builder<E, P>(endpoint: E, prefix: P) -> CfKvFsBuilder
+    where
+        E: Into<String>,
+        P: Into<String>,
+    {
+        CfKvFsBuilder::new(endpoint, prefix)
+    }
+
+    pub fn new<E, P>(endpoint: E, prefix: P) -> Option<Self>
+    where
+        E: Into<String>,
+        P: Into<String>,
+    {
+        Self::inner_new(endpoint, prefix, None, None, Some(Box::new(|data| data)))
+    }
+
+    fn inner_new<E, P>(
+        endpoint: E,
+        prefix: P,
+        header: Option<HeaderMap>,
+        pem: Option<Vec<u8>>,
+        reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+    ) -> Option<Self>
     where
         E: Into<String>,
         P: Into<String>,
@@ -43,6 +132,9 @@ impl CfKvFs {
             .redirect(Policy::none())
             .no_proxy()
             .http2_prior_knowledge();
+        if let Some(header) = header {
+            builder = builder.default_headers(header);
+        }
         if let Some(pem) = pem {
             if let Ok(identity) = Identity::from_pem(&pem) {
                 builder = builder.identity(identity);
@@ -53,6 +145,7 @@ impl CfKvFs {
                 client,
                 endpoint: endpoint.into(),
                 prefix: prefix.into(),
+                reducer,
             })
         } else {
             None
@@ -61,6 +154,11 @@ impl CfKvFs {
 
     fn post_data(&self, name: &str, data: Vec<u8>, index: bool) -> i64 {
         let mut retry = 0;
+        let data = if let (Some(reducer), false) = (&self.reducer, index) {
+            reducer(data)
+        } else {
+            data
+        };
         let hash = get_hash(&data);
         while let Err(err) = self
             .client
@@ -138,7 +236,12 @@ impl CfKvFs {
                 retry += 1;
             }
         }
-        Ok(KV_CACHE.lock().unwrap().put(key, buf)?)
+        let data = KV_CACHE.lock().unwrap().put(key, buf)?;
+        if let (Some(reducer), false) = (&self.reducer, hash == 0) {
+            Ok(reducer(data))
+        } else {
+            Ok(data)
+        }
     }
 
     pub fn get_blob(&self, name: &str) -> Result<Vec<u8>, CfKvFsError> {
@@ -161,14 +264,20 @@ impl CfKvFs {
 #[test]
 fn test_upload() {
     let pem = include_bytes!("cert.pem");
-    let cf = CfKvFs::new("https://darksky.eu.org", "fs", Some(pem.to_vec())).unwrap();
+    let cf = CfKvFs::builder("https://darksky.eu.org", "fs")
+        .reducer(|a| a.iter().chain(std::iter::once(&0)).cloned().collect())
+        .pem(pem.to_vec())
+        .build()
+        .unwrap();
     cf.put_blob("test.bin", std::fs::read("test.bin").unwrap());
 }
 
 #[test]
 fn test_download() {
-    let pem = include_bytes!("cert.pem");
-    let cf = CfKvFs::new("https://darksky.eu.org", "fs", Some(pem.to_vec())).unwrap();
+    let cf = CfKvFs::builder("https://darksky.eu.org", "fs")
+        .auth("Bearer 12345")
+        .build()
+        .unwrap();
     let bin = cf.get_blob("test.bin").unwrap();
     std::fs::write("test1.bin", bin).unwrap();
 }
