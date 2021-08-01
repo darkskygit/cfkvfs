@@ -1,0 +1,22 @@
+[package]
+name = "cfkvfs"
+version = "0.1.0"
+authors = ["DarkSky <darksky2048@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies]
+lazy_static = "1.4.0"
+log = "0.4.14"
+rayon = "1.5.1"
+sha3 = "0.9.1"
+thiserror = "1.0.26"
+
+[dependencies.reqwest]
+version = "0.11.4"
+default-features = false
+features = ["blocking", "gzip", "json", "rustls-tls"]
+
+[dependencies.rusqlite]
+version = "0.25.3"
+features = ["bundled"]
