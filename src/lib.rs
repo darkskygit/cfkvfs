@@ -14,7 +14,8 @@ use reqwest::{
 use std::{
     convert::TryInto,
     iter::FromIterator,
-    sync::{Arc, Mutex},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, RwLock},
 };
 use thiserror::Error;
 use utils::get_hash;
@@ -41,6 +42,8 @@ pub struct CfKvFsBuilder {
     header: Option<HeaderMap>,
     pem: Option<Vec<u8>>,
     reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+    path: Option<PathBuf>,
+    table: Option<String>,
 }
 
 impl CfKvFsBuilder {
@@ -55,6 +58,8 @@ impl CfKvFsBuilder {
             header: None,
             pem: None,
             reducer: None,
+            path: None,
+            table: None,
         }
     }
 
@@ -82,7 +87,18 @@ impl CfKvFsBuilder {
         self
     }
 
+    pub fn path<P: AsRef<Path>>(mut self, path: P) -> Self {
+        self.path = Some(path.as_ref().to_path_buf());
+        self
+    }
+
+    pub fn table<S: Into<String>>(mut self, table: S) -> Self {
+        self.table = Some(table.into());
+        self
+    }
+
     pub fn build(self) -> Option<CfKvFs> {
+        CfKvFs::set_kv_cache(self.path, self.table);
         CfKvFs::inner_new(
             self.endpoint,
             self.prefix,
@@ -152,6 +168,31 @@ impl CfKvFs {
         }
     }
 
+    fn set_kv_cache(
+        path: Option<PathBuf>,
+        name: Option<String>,
+    ) -> Arc<Mutex<Box<dyn KvCache + Send + Sync>>> {
+        lazy_static! {
+            static ref KV_PATH: Arc<RwLock<PathBuf>> = Arc::new(RwLock::new("./cache.db".into()));
+            static ref KV_TABLE: Arc<RwLock<String>> = Arc::new(RwLock::new("kv".into()));
+            static ref KV_CACHE: Arc<Mutex<Box<dyn KvCache + Send + Sync>>> = Arc::new(Mutex::new(
+                SqliteKvCache::new(&*KV_PATH.read().unwrap(), &*KV_TABLE.read().unwrap())
+                    .unwrap_or_else(|_| LruKvCache::new())
+            ));
+        }
+        if let Some(path) = path {
+            *KV_PATH.write().unwrap() = path;
+        }
+        if let Some(name) = name {
+            *KV_TABLE.write().unwrap() = name;
+        }
+        KV_CACHE.clone()
+    }
+
+    fn get_kv_cache() -> Arc<Mutex<Box<dyn KvCache + Send + Sync>>> {
+        Self::set_kv_cache(None, None)
+    }
+
     fn post_data(&self, name: &str, data: Vec<u8>, index: bool) -> i64 {
         let mut retry = 0;
         let data = if let (Some(reducer), false) = (&self.reducer, index) {
@@ -197,11 +238,6 @@ impl CfKvFs {
     }
 
     fn get_data(&self, name: &str, hash: i64) -> Result<Vec<u8>, CfKvFsError> {
-        lazy_static! {
-            static ref KV_CACHE: Arc<Mutex<Box<dyn KvCache + Send + Sync>>> = Arc::new(Mutex::new(
-                SqliteKvCache::new("./cache.db", "kv").unwrap_or_else(|_| LruKvCache::new())
-            ));
-        }
         let key = format!(
             "{}:{}",
             name,
@@ -211,7 +247,7 @@ impl CfKvFs {
                 hash.to_string()
             }
         );
-        if let Ok(Some(value)) = KV_CACHE.lock().unwrap().get(key.clone()) {
+        if let Ok(Some(value)) = Self::get_kv_cache().lock().unwrap().get(key.clone()) {
             return Ok(value);
         }
         let mut retry = 0;
@@ -236,7 +272,7 @@ impl CfKvFs {
                 retry += 1;
             }
         }
-        let data = KV_CACHE.lock().unwrap().put(key, buf)?;
+        let data = Self::get_kv_cache().lock().unwrap().put(key, buf)?;
         if let (Some(reducer), false) = (&self.reducer, hash == 0) {
             Ok(reducer(data))
         } else {
@@ -276,6 +312,7 @@ fn test_upload() {
 fn test_download() {
     let cf = CfKvFs::builder("https://darksky.eu.org", "fs")
         .auth("Bearer 12345")
+        .table("test1")
         .build()
         .unwrap();
     let bin = cf.get_blob("test.bin").unwrap();
