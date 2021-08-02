@@ -3,6 +3,13 @@ name = "cfkvfs"
 version = "0.1.0"
 authors = ["DarkSky <darksky2048@gmail.com>"]
 edition = "2018"
+description = "Cache files"
+license = "AGPL-3.0-or-later"
+homepage = "https://github.com/darkskygit/cfkvfs"
+repository = "https://github.com/darkskygit/cfkvfs"
+keywords = ["database", "cache"]
+include = ["src/**/*", "LICENSE", "README.md"]
+readme = "README.md"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [dependencies]

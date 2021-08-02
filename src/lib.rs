@@ -36,12 +36,14 @@ pub enum CfKvFsError {
     HashError,
 }
 
+type Reducer = Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>;
+
 pub struct CfKvFsBuilder {
     endpoint: String,
     prefix: String,
     header: Option<HeaderMap>,
     pem: Option<Vec<u8>>,
-    reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+    reducer: Option<Reducer>,
     path: Option<PathBuf>,
     table: Option<String>,
 }
@@ -113,7 +115,7 @@ pub struct CfKvFs {
     client: Client,
     endpoint: String,
     prefix: String,
-    reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+    reducer: Option<Reducer>,
 }
 
 impl CfKvFs {
@@ -138,7 +140,7 @@ impl CfKvFs {
         prefix: P,
         header: Option<HeaderMap>,
         pem: Option<Vec<u8>>,
-        reducer: Option<Box<dyn Fn(Vec<u8>) -> Vec<u8> + Sync>>,
+        reducer: Option<Reducer>,
     ) -> Option<Self>
     where
         E: Into<String>,
@@ -224,7 +226,7 @@ impl CfKvFs {
                 retry += 1;
             }
         }
-        return hash;
+        hash
     }
 
     pub fn put_blob(&self, name: &str, data: Vec<u8>) {
@@ -299,22 +301,20 @@ impl CfKvFs {
 
 #[test]
 fn test_upload() {
-    let pem = include_bytes!("cert.pem");
-    let cf = CfKvFs::builder("https://darksky.eu.org", "fs")
+    let cache_handler = CfKvFs::builder("https://example.com", "path")
         .reducer(|a| a.iter().chain(std::iter::once(&0)).cloned().collect())
-        .pem(pem.to_vec())
         .build()
         .unwrap();
-    cf.put_blob("test.bin", std::fs::read("test.bin").unwrap());
+    cache_handler.put_blob("test.bin", std::fs::read("test.bin").unwrap());
 }
 
 #[test]
 fn test_download() {
-    let cf = CfKvFs::builder("https://darksky.eu.org", "fs")
+    let cache_handler = CfKvFs::builder("https://example.com", "path")
         .auth("Bearer 12345")
         .table("test1")
         .build()
         .unwrap();
-    let bin = cf.get_blob("test.bin").unwrap();
-    std::fs::write("test1.bin", bin).unwrap();
+    let data = cache_handler.get_blob("test.bin").unwrap();
+    std::fs::write("test1.bin", data).unwrap();
 }

@@ -23,7 +23,7 @@ impl LruKvCache {
 
 impl KvCache for LruKvCache {
     fn get(&mut self, key: String) -> Result<Option<Vec<u8>>, CfKvFsError> {
-        Ok(self.cache.get(&key).map(|v| v.clone()))
+        Ok(self.cache.get(&key).cloned())
     }
 
     fn put(&mut self, key: String, value: Vec<u8>) -> Result<Vec<u8>, CfKvFsError> {
@@ -77,7 +77,7 @@ impl KvCache for SqliteKvCache {
             let conn = self.conn.lock().unwrap();
             let mut stmt =
                 conn.prepare(&format!("SELECT value FROM {} WHERE key = ?1", &self.name))?;
-            let mut maps = stmt.query_map([key], |row| Ok(row.get(0)?))?;
+            let mut maps = stmt.query_map([key], |row| row.get(0))?;
             Ok(maps.next().and_then(|row| row.ok()))
         }
     }
